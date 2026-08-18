@@ -93,6 +93,7 @@ export class TuituiRuntime {
     this.#bridge = new TuituiHarnessBridge({
       bot: {
         sendText: (target, text) => client.im.sendText({ to: target, text }).then(() => undefined),
+        sendFile: (target, filePath) => client.im.sendFile({ to: target, source: filePath }).then(() => undefined),
       },
       harness: this.#harness,
       state: this.#state,

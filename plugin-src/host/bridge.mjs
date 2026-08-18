@@ -1,3 +1,11 @@
+import {
+  createAndSendFile,
+  extractCreateFileMarker,
+  extractFileMarker,
+  matchSendFileCommand,
+  sendLocalFile,
+} from './files.mjs';
+
 function cleanText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -16,7 +24,7 @@ export function createTuituiBridgeStatus() {
 
 /**
  * 把推推入站消息转发给 Harness agent，并把回答发回推推。
- * bot 接口：{ sendText(target, text) }，target 为推推 ToTarget。
+ * bot 接口：{ sendText(target, text), sendFile(target, filePath) }，target 为推推 ToTarget。
  */
 export class TuituiHarnessBridge {
   #bot;
@@ -90,6 +98,19 @@ export class TuituiHarnessBridge {
         await this.#state.markSeen(messageId);
         return;
       }
+
+      // 1) 显式文件指令（/send、发送文件...）
+      const sendFileArg = matchSendFileCommand(text);
+      if (sendFileArg) {
+        const result = await sendLocalFile({ bot: this.#bot, to: target, input: text });
+        if (!result.ok) {
+          await this.#bot.sendText(target, `\`${result.message}\``);
+        }
+        await this.#state.markSeen(messageId);
+        return;
+      }
+
+      // 2) 指令处理
       const command = text.toLowerCase();
       if (command === '/help') {
         await this.#bot.sendText(target, [
@@ -99,6 +120,10 @@ export class TuituiHarnessBridge {
           '/new  开启一个全新会话',
           '/status  检查连接状态',
           '/help  显示本帮助',
+          '',
+          '文件操作：',
+          '  /send <路径>  发送本地文件',
+          '  发送文件 <路径>  同上',
         ].join('\n'));
         await this.#state.markSeen(messageId);
         return;
@@ -117,6 +142,7 @@ export class TuituiHarnessBridge {
         return;
       }
 
+      // 3) 交给 Harness 生成回复
       let sessionId = this.#state.sessionFor(conversationKey);
       if (!sessionId || !(await this.#harness.sessionExists(sessionId))) {
         sessionId = await this.#harness.createSession();
@@ -126,6 +152,44 @@ export class TuituiHarnessBridge {
       const answer = await this.#harness.ask(sessionId, text, {
         timeoutMs: this.#replyTimeoutMs,
       });
+
+      // 4) 解析 AI 回复中的文件协议标记：优先创建文件，其次发送已有文件
+      const createMarker = extractCreateFileMarker(answer);
+      const fileMarker = extractFileMarker(answer);
+      let sendResult = null;
+
+      if (createMarker) {
+        sendResult = await createAndSendFile({
+          bot: this.#bot,
+          to: target,
+          path: createMarker.path,
+          content: createMarker.content,
+        });
+      } else if (fileMarker) {
+        sendResult = await sendLocalFile({
+          bot: this.#bot,
+          to: target,
+          input: `发送文件 ${fileMarker}`,
+        });
+      }
+
+      if (sendResult) {
+        // AI 生成的说明文字（[FILE_DONE] 之后/ [FILE] 之后的自然语言部分）作为消息发出
+        const note = createMarker ? answer.split('[FILE_DONE]')[1] ?? '' : answer.replace(/^\s*\[FILE\][^\n]*\n?/, '');
+        if (sendResult.ok) {
+          const text = [note.trim(), `\`${sendResult.message}\``].filter(Boolean).join('\n') || '文件已发送';
+          await this.#bot.sendText(target, text);
+        } else {
+          await this.#bot.sendText(target, `文件操作未完成：${sendResult.message}`);
+        }
+        await this.#state.markSeen(messageId);
+        this.#status.messagesReplied += 1;
+        this.#status.lastReplyAt = new Date().toISOString();
+        this.#status.lastError = null;
+        return;
+      }
+
+      // 5) 普通文本回复
       await this.#bot.sendText(target, answer);
       await this.#state.markSeen(messageId);
       this.#status.messagesReplied += 1;
