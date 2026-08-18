@@ -43,6 +43,7 @@ dsh plugin --profile web add .
 
 - `/new` - 开启新会话
 - `/status` - 检查连接状态
+- `/send` - 接收远端文件
 - `/help` - 显示帮助
 
 ## 配置（可选）
